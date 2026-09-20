@@ -1,0 +1,27 @@
+step1:
+  watts: 3
+  current_mA: 250
+  voltage_V: 300
+  duration_seconds: 120
+
+step2:
+  watts: 2
+  current_mA: 250
+  voltage_V: 300
+  duration_seconds: 90
+
+step3:
+  watts: 1
+  current_mA: 250
+  voltage_V: 300
+  duration_seconds: 300
+
+collection:
+  type: collection
+  watts: 3
+  current_mA: 250
+  voltage_V: 300
+  duration_seconds: 900
+  cut_off_voltage: 250
+  cut_off_wattage: 2
+  cut_off_time_s: 600

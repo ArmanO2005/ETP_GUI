@@ -1,8 +1,9 @@
 import time
+import math
 import threading
 import tkinter as tk
 from pathlib import Path
-from tkinter import messagebox, ttk
+from tkinter import messagebox, simpledialog, ttk
 
 import matplotlib
 matplotlib.use("TkAgg")
@@ -38,12 +39,17 @@ def _format_mmss(seconds):
 class WellPanel:
     """The controls + status for one well: config picker, activate/stop, live readout."""
 
-    def __init__(self, parent, idx, name, config_names, on_activate, on_stop):
+    def __init__(self, parent, idx, name, config_names, on_activate, on_stop, on_rename=None):
         self.idx = idx
+        self.default_name = f"Well {idx + 1}"
         self.name = name
+        self.on_rename = on_rename
         self.state = "idle"
 
         self.frame = ttk.LabelFrame(parent, text=name, padding=10)
+
+        ttk.Button(self.frame, text="✎ Rename", width=10,
+                   command=self._prompt_rename).pack(anchor="e", pady=(0, 6))
 
         self.config_var = tk.StringVar(value=config_names[0] if config_names else "")
         self.combo = ttk.Combobox(self.frame, textvariable=self.config_var, values=config_names,
@@ -69,6 +75,23 @@ class WellPanel:
 
     def grid(self, **kwargs):
         self.frame.grid(**kwargs)
+
+    def _prompt_rename(self):
+        current = "" if self.name == self.default_name else self.name
+        new = simpledialog.askstring(
+            "Rename well",
+            f"Experiment name for {self.default_name}\n"
+            f"(leave blank to restore the default name):",
+            initialvalue=current, parent=self.frame)
+        if new is None:
+            return
+        self.set_name(new.strip() or self.default_name)
+
+    def set_name(self, name):
+        self.name = name
+        self.frame.configure(text=name)
+        if self.on_rename is not None:
+            self.on_rename(self.idx, name)
 
     def set_config_options(self, config_names):
         self.combo.configure(values=config_names, state="readonly" if config_names else "disabled")
@@ -143,7 +166,7 @@ class App(tk.Tk):
         self.stop_events = {i: threading.Event() for i in range(self.n_wells)}
         self.collect_states = {}
         self.prev_collect = {i: False for i in range(self.n_wells)}
-        self.voltage_logs = {i: [] for i in range(self.n_wells)}
+        self.sample_logs = {i: [] for i in range(self.n_wells)}
         self.step_states = {i: None for i in range(self.n_wells)}
         self.threads = {i: None for i in range(self.n_wells)}
         self.done_flags = {i: None for i in range(self.n_wells)}
@@ -170,6 +193,9 @@ class App(tk.Tk):
         ttk.Button(btns, text="⟳ Refresh Configs", command=self._refresh_configs).pack(side="left", padx=4)
         ttk.Button(btns, text="Start All", command=self._start_all).pack(side="left", padx=4)
         ttk.Button(btns, text="Stop All", command=self._stop_all).pack(side="left", padx=4)
+        self.diagnostic_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(btns, text="Diagnostic Mode (Ω)", variable=self.diagnostic_var,
+                         command=self._redraw_plot).pack(side="left", padx=(12, 4))
 
         wells_frame = ttk.Frame(self, padding=(12, 0))
         wells_frame.pack(fill="x")
@@ -177,7 +203,8 @@ class App(tk.Tk):
         for i in range(self.n_wells):
             wells_frame.columnconfigure(i, weight=1, uniform="well")
             panel = WellPanel(wells_frame, i, self.well_names[i], self.config_names,
-                               on_activate=self._activate, on_stop=self._stop)
+                               on_activate=self._activate, on_stop=self._stop,
+                               on_rename=self._rename_well)
             panel.grid(row=0, column=i, sticky="nsew", padx=6, pady=8)
             self.wells.append(panel)
 
@@ -189,11 +216,11 @@ class App(tk.Tk):
         plot_frame.pack(fill="both", expand=True)
         self.fig = Figure(figsize=(9, 4.5), facecolor="#fcfcfb")
         self.ax = self.fig.add_subplot(111, facecolor="#fcfcfb")
-        self._style_axes()
+        self._style_voltage_axes()
         self.canvas = FigureCanvasTkAgg(self.fig, master=plot_frame)
         self.canvas.get_tk_widget().pack(fill="both", expand=True)
 
-    def _style_axes(self):
+    def _style_voltage_axes(self):
         ax = self.ax
         ax.clear()
         ax.set_facecolor("#fcfcfb")
@@ -208,12 +235,32 @@ class App(tk.Tk):
             ax.spines[spine].set_color("#c3c2b7")
         ax.tick_params(colors="#898781")
 
+    def _style_diagnostic_axes(self):
+        ax = self.ax
+        ax.clear()
+        ax.set_facecolor("#fcfcfb")
+        ax.set_xlabel("Time (s)", color="#52514e")
+        ax.set_ylabel("Resistance (Ω)", color="#52514e")
+        ax.set_title("Live Well Diagnostics — Resistance (V / I)", color="#0b0b0b")
+        ax.grid(True, color="#e1e0d9", linewidth=0.8)
+        ax.set_axisbelow(True)
+        for spine in ("top", "right"):
+            ax.spines[spine].set_visible(False)
+        for spine in ("left", "bottom"):
+            ax.spines[spine].set_color("#c3c2b7")
+        ax.tick_params(colors="#898781")
+
     def _refresh_configs(self):
         self.config_files = discover_configs(self.config_dir)
         self.config_names = [f.name for f in self.config_files]
         self.config_map = {f.name: str(f) for f in self.config_files}
         for w in self.wells:
             w.set_config_options(self.config_names)
+
+    def _rename_well(self, idx, name):
+        """Keep the plot legend / dialogs in sync with a user-renamed well."""
+        self.well_names[idx] = name
+        self._redraw_plot()
 
     # --- well lifecycle ---
 
@@ -232,7 +279,7 @@ class App(tk.Tk):
         self.stop_events[idx] = stop_event
         self.collect_states[idx] = False
         self.prev_collect[idx] = False
-        self.voltage_logs[idx] = []
+        self.sample_logs[idx] = []
         self.step_states[idx] = None
         self.done_flags[idx] = None
         self.errors[idx] = None
@@ -245,8 +292,8 @@ class App(tk.Tk):
     def _worker(self, idx, yaml_path, stop_event):
         channel = self.channels[idx]
 
-        def on_sample(t, v):
-            self.voltage_logs[idx].append((t, v))
+        def on_sample(t, v, i, w):
+            self.sample_logs[idx].append((t, v, i, w))
 
         def on_step_progress(step_name, elapsed, duration):
             self.step_states[idx] = (step_name, elapsed, duration)
@@ -300,7 +347,7 @@ class App(tk.Tk):
                 well.clear_collect_flag()
             self.prev_collect[idx] = collecting
 
-            log = self.voltage_logs[idx]
+            log = self.sample_logs[idx]
             if log and well.state in ("running", "stopping"):
                 well.update_readout(log[-1][1])
 
@@ -329,17 +376,58 @@ class App(tk.Tk):
                   font=("Segoe UI", 10), wraplength=280, justify="center").pack(pady=(6, 14))
         ttk.Button(frame, text="Acknowledge", command=top.destroy).pack()
 
+    @staticmethod
+    def _robust_ylim(values, lower_pct=5, upper_pct=95, pad_frac=0.15, floor=0.0):
+        """Percentile-based y-limits: a rare out-of-distribution shock (a fault
+        spike, a transient near-zero-current blowup) sits outside the central
+        [lower_pct, upper_pct] band and gets excluded from the range instead of
+        single-handedly rescaling the whole axis and flattening the normal trend.
+        The point itself still plots and visibly runs off the top/bottom edge.
+        """
+        clean = [v for v in values if not math.isnan(v)]
+        if len(clean) < 2:
+            return None
+        ordered = sorted(clean)
+        n = len(ordered)
+        lo = ordered[max(0, int(n * lower_pct / 100))]
+        hi = ordered[min(n - 1, int(n * upper_pct / 100))]
+        if hi <= lo:
+            hi = lo + 1.0
+        pad = (hi - lo) * pad_frac
+        return (max(floor, lo - pad), hi + pad)
+
     def _redraw_plot(self):
-        self._style_axes()
+        diagnostic = self.diagnostic_var.get()
+        if diagnostic:
+            self._style_diagnostic_axes()
+        else:
+            self._style_voltage_axes()
+
         any_data = False
+        all_resistances = []
         for idx in range(self.n_wells):
-            samples = self.voltage_logs[idx]
+            samples = self.sample_logs[idx]
             if not samples:
                 continue
             any_data = True
-            times, voltages = zip(*samples)
             color = CHANNEL_COLORS[idx % len(CHANNEL_COLORS)]
-            self.ax.plot(times, voltages, color=color, linewidth=1.8, label=self.well_names[idx])
+            if diagnostic:
+                times, voltages, currents, _watts = zip(*samples)
+                # Below ~0.5mA, V/I is dominated by noise rather than the well's
+                # actual resistance, so blank those points instead of plotting a spike.
+                resistances = [v / (i / 1000.0) if i > 0.5 else float("nan")
+                               for v, i in zip(voltages, currents)]
+                all_resistances.extend(resistances)
+                self.ax.plot(times, resistances, color=color, linewidth=1.8, label=self.well_names[idx])
+            else:
+                times, voltages, _currents, _watts = zip(*samples)
+                self.ax.plot(times, voltages, color=color, linewidth=1.8, label=self.well_names[idx])
+
+        if diagnostic:
+            ylim = self._robust_ylim(all_resistances)
+            if ylim is not None:
+                self.ax.set_ylim(*ylim)
+
         if any_data:
             self.ax.legend(frameon=False, labelcolor="#0b0b0b", loc="upper left")
         self.canvas.draw_idle()

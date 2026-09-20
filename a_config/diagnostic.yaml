@@ -1,0 +1,32 @@
+# Well health check: a short constant-current sweep for verifying a well's
+# electrical resistance (R = V / I) is stable and in-range, rather than
+# running a real collection.
+#
+# `current_mA` is the deliberate low test setpoint for each step (10/15/25mA,
+# well below the ~250mA production current) so the check itself doesn't
+# stress the electrodes. `voltage_V` is a generous fault-detection ceiling
+# (~3x the voltage a placeholder 1 kOhm nominal well resistance would need at
+# that current) so current stays the binding limit for a healthy well —
+# voltage should settle well below the ceiling, giving a roughly consistent
+# R = V / I across all three steps. A well that instead pegs at its ceiling
+# without settling, or whose resistance swings wildly between steps, is
+# suspect (open circuit / bad electrode contact / short). Recalibrate the
+# ceilings once real baseline resistance data is available.
+
+step1:
+  watts: 5
+  current_mA: 20
+  voltage_V: 30
+  duration_seconds: 8
+
+step2:
+  watts: 5
+  current_mA: 30
+  voltage_V: 45
+  duration_seconds: 8
+
+step3:
+  watts: 5
+  current_mA: 50
+  voltage_V: 75
+  duration_seconds: 8

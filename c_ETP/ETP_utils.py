@@ -58,7 +58,7 @@ def plot_channel_voltages(voltage_logs, channel_indices, plot_path="voltage_plot
         samples = voltage_logs.get(idx, [])
         if not samples:
             continue
-        times, voltages = zip(*samples)
+        times, voltages, _currents, _watts = zip(*samples)
         ax.plot(times, voltages, color=CHANNEL_COLORS[n % len(CHANNEL_COLORS)], linewidth=2, label=f"Channel {idx}")
 
     ax.set_xlabel("Time (s)", color="#52514e")
@@ -88,9 +88,10 @@ def run_sequence(channel, yaml_path, lock=None, collect_states=None, channel_key
     stop_event is an optional threading.Event; when set, the current step
     winds down early (output is stopped) and no further steps run.
 
-    on_sample is an optional callback(elapsed_t, voltage) invoked once per
-    reading, with elapsed_t measured from the start of the whole sequence
-    (not just the current step) so callers can plot a continuous trace.
+    on_sample is an optional callback(elapsed_t, voltage, current_mA, watts)
+    invoked once per reading, with elapsed_t measured from the start of the
+    whole sequence (not just the current step) so callers can plot a
+    continuous trace.
 
     on_step_progress is an optional callback(step_name, elapsed_in_step_s,
     duration_s) invoked once when a step starts and again on every reading
@@ -107,7 +108,7 @@ def run_sequence(channel, yaml_path, lock=None, collect_states=None, channel_key
             break
         print(f"Running {step_name}...")
         duration_s = step["duration_seconds"]
-        step_on_sample = (lambda t, v, _elapsed=elapsed: on_sample(_elapsed + t, v)) if on_sample else None
+        step_on_sample = (lambda t, v, i, w, _elapsed=elapsed: on_sample(_elapsed + t, v, i, w)) if on_sample else None
         step_on_progress = (lambda t, d, _name=step_name: on_step_progress(_name, t, d)) if on_step_progress else None
         if step_on_progress:
             step_on_progress(0.0, duration_s)
@@ -142,7 +143,7 @@ def run_sequence(channel, yaml_path, lock=None, collect_states=None, channel_key
                 on_sample=step_on_sample,
                 on_step_progress=step_on_progress,
             )
-        samples.extend((elapsed + t, v) for t, v in step_samples)
+        samples.extend((elapsed + t, v, i, w) for t, v, i, w in step_samples)
         elapsed += step_samples[-1][0] if step_samples else 0.0
 
     return samples
@@ -180,12 +181,14 @@ def run_step(channel, watts, current_limit_mA, voltage_limit_V, duration_s, pola
                 raise RuntimeError("Power supply interlock opened mid-step — output stopped.")
             t = time.time() - start
             voltage = channel.GetVoltage()
-            samples.append((t, voltage))
+            current = channel.GetCurrent()
+            power = channel.GetPower()
+            samples.append((t, voltage, current, power))
             if on_sample:
-                on_sample(t, voltage)
+                on_sample(t, voltage, current, power)
             if on_step_progress:
                 on_step_progress(t, duration_s)
-            print(f"  t={t:5.1f}s  P={channel.GetPower():.2f}W  V={voltage:.1f}V  I={channel.GetCurrent():.3f}mA")
+            print(f"  t={t:5.1f}s  P={power:.2f}W  V={voltage:.1f}V  I={current:.3f}mA")
         time.sleep(0.5)
 
     with ctx:
@@ -225,12 +228,14 @@ def run_collection_stage(channel, watts, current_limit_mA, voltage_limit_V, dura
                 raise RuntimeError("Power supply interlock opened mid-step — output stopped.")
             t = time.time() - start
             voltage = channel.GetVoltage()
-            samples.append((t, voltage))
+            current = channel.GetCurrent()
+            power = channel.GetPower()
+            samples.append((t, voltage, current, power))
             if on_sample:
-                on_sample(t, voltage)
+                on_sample(t, voltage, current, power)
             if on_step_progress:
                 on_step_progress(t, duration_s)
-            print(f"  t={t:5.1f}s  P={channel.GetPower():.2f}W  V={voltage:.1f}V  I={channel.GetCurrent():.3f}mA")
+            print(f"  t={t:5.1f}s  P={power:.2f}W  V={voltage:.1f}V  I={current:.3f}mA")
             if voltage >= cut_off_voltage:
                 hit_cutoff = True
         if hit_cutoff:
@@ -247,7 +252,7 @@ def run_collection_stage(channel, watts, current_limit_mA, voltage_limit_V, dura
         collect_states[channel_key] = True
 
     offset = samples[-1][0] if samples else 0.0
-    cutoff_on_sample = (lambda t, v, _offset=offset: on_sample(_offset + t, v)) if on_sample else None
+    cutoff_on_sample = (lambda t, v, i, w, _offset=offset: on_sample(_offset + t, v, i, w)) if on_sample else None
     if on_step_progress:
         on_step_progress(0.0, cut_off_time_s)
     cutoff_samples = run_step(
@@ -262,7 +267,7 @@ def run_collection_stage(channel, watts, current_limit_mA, voltage_limit_V, dura
         on_sample=cutoff_on_sample,
         on_step_progress=on_step_progress,
     )
-    samples.extend((offset + t, v) for t, v in cutoff_samples)
+    samples.extend((offset + t, v, i, w) for t, v, i, w in cutoff_samples)
 
     if collect_states is not None:
         collect_states[channel_key] = False
